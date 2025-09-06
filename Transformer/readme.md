@@ -249,3 +249,124 @@ class LayerNormalization(nn.Module):
 * LN 的核心思想就是 **对每个样本的 embedding 向量做归一化，再通过可学习参数调整分布**。
 
 ---
+
+# 🔹 Position-wise Feed-Forward Networks (FFN)
+
+**前馈神经网络（Feed Forward Network, FFN）** 是 Transformer 中的 **模块5**。
+它本质上就是一个 **两层的多层感知机（MLP）**，作用是对序列中的每个位置单独进行非线性变换。
+
+---
+
+## 📌 模块逻辑
+
+1. **输入输出维度一致**
+
+   * 输入维度：`d_model`
+   * 输出维度：`d_model`
+   * 这样才能和残差连接保持一致。
+
+2. **中间升维**
+
+   * 先从 `d_model → d_ff`（一般 2048）。
+   * 再从 `d_ff → d_model`（还原回输入维度）。
+   * 这种 **升维再降维** 的方式，让模型具备更强的非线性表达能力。
+
+3. **逐位置独立**
+
+   * FFN 会对序列中的每个位置 **独立应用相同的两层 MLP**。
+   * 不会在不同位置之间交互 → 交互由 **Attention** 来完成。
+
+---
+
+## 📌 学习过程中的常见错误与注意点
+
+1. **Linear 输入输出维度搞反**
+
+   * 错误：写成 `nn.Linear(d_ff, d_model)`。
+   * 修正：应先 `d_model → d_ff`，再 `d_ff → d_model`。
+
+2. **忘记加激活函数**
+
+   * 如果没有 `ReLU/GELU`，模型退化为两层线性层，等效于一层。
+
+3. **丢掉 Dropout**
+
+   * 容易过拟合，Transformer 原论文里默认在第一层后加 Dropout。
+
+4. **和 CNN 的关系**
+
+   * FFN 可以看作 **两个卷积核大小为 1 的卷积**，本质等价于逐位置的全连接层。
+
+---
+
+## ✨ 总结
+
+* FFN 是 Transformer 中的 **位置独立 MLP**。
+* 结构：
+
+  ```
+  Linear(d_model → d_ff) → ReLU → Dropout → Linear(d_ff → d_model)
+  ```
+* 意义：
+
+  * **Attention** 负责位置之间的信息交互。
+  * **FFN** 负责逐位置的非线性特征变换。
+* 注意事项：
+
+  * Linear 维度要正确。
+  * 激活函数和 Dropout 不能漏。
+
+---
+
+## 🔹 代码封装
+
+在完整的 Transformer 编码器与解码器结构中，通常会将子层进行进一步的封装，以简化代码与结构表达。
+
+### Block 1：Multi-Head Attention + Add & Norm
+
+* **组成部分**：多头注意力机制（MHA）、残差连接（Add）、层归一化（LayerNorm）
+* **作用**：
+
+  1. 通过多头注意力机制捕获序列内部的全局依赖关系。
+  2. 使用残差连接解决梯度消失和模型退化问题。
+  3. 层归一化保证数值稳定，加速训练收敛。
+* **输入输出**：输入为 `[batch, seq_len, d_model]`，输出维度保持不变。
+
+---
+
+### Block 2：Feed Forward Network + Add & Norm
+
+* **组成部分**：前馈神经网络（FFN）、残差连接（Add）、层归一化（LayerNorm）
+* **作用**：
+
+  1. 通过两层全连接 + ReLU 引入非线性变换，提升表示能力。
+  2. 残差连接让网络在深层依然能有效传播信息。
+  3. 层归一化保持稳定性，避免数值过大或过小。
+* **输入输出**：输入为 `[batch, seq_len, d_model]`，输出维度保持不变。
+
+---
+
+### EncoderLayer（编码器层）
+
+* **结构**：Block1 → Block2
+* **作用**：先通过注意力建模序列的依赖关系，再通过前馈网络提升特征表达。
+
+---
+
+### DecoderLayer（解码器层）
+
+* **结构**：Block1（Masked Self-Attention） → Block1（Encoder-Decoder Attention） → Block2
+* **作用**：
+
+  1. **Masked Self-Attention**：保证解码时只利用已生成的序列，防止信息泄露。
+  2. **Encoder-Decoder Attention**：将编码器的输出作为 memory，帮助解码器获取源序列信息。
+  3. **Feed Forward Network**：进一步增强特征的非线性表达。
+
+---
+
+📌 **总结**：
+通过对 MHA、FFN、Add & Norm 的合理封装，我们可以更清晰地搭建 Transformer 编码器和解码器层，同时保证代码复用性与可读性。
+
+---
+
+

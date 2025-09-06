@@ -18,169 +18,255 @@ from torch.utils.data import Dataset, DataLoader
 
 from transformers.utils import PaddingStrategy
 
+
+# -------------------------------
+# 模块1：位置编码器 (Positional Encoding)
+# -------------------------------
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model=512, dropout=0.1, max_len=5000):
         super(PositionalEncoding, self).__init__()
         self.dropout = nn.Dropout(p=dropout)
 
-        # 初始化位置编码矩阵 (1, max_len, d_model)
+        # 初始化位置编码矩阵 (max_len, d_model)
         pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = 10000 ** (-torch.arange(0, d_model, 2).float() / d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)  # [max_len, 1]
+        div_term = 10000 ** (-torch.arange(0, d_model, 2).float() / d_model)  # 频率因子
 
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)  # 增加 batch 维度 匹配输入的x
+        # 按照公式给偶数/奇数位置赋值
+        pe[:, 0::2] = torch.sin(position * div_term)  # 偶数列
+        pe[:, 1::2] = torch.cos(position * div_term)  # 奇数列
+        pe = pe.unsqueeze(0)  # [1, max_len, d_model]，方便和 batch 输入相加
 
-        # 保存为 buffer（不会更新参数，但能随模型保存/迁移）
+        # 注册为 buffer：不是参数，不会更新，但保存到模型中
         self.register_buffer("pe", pe)
 
     def forward(self, x):
-        # x: (batch_size, seq_len, d_model)
+        # 输入: x [batch_size, seq_len, d_model]
+        # 加上对应位置的编码
         x = x + self.pe[:, :x.size(1)]
         return self.dropout(x)
 
+
+# -------------------------------
+# 模块2：Scaled Dot-Product Attention
+# -------------------------------
 def attention(query, key, value, mask=None, dropout=None):
     d_k = query.size(-1)
+
     # 1. QK^T / sqrt(d_k)
     scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(d_k)
 
-    # 2. 掩码 (mask==0 的位置设为 -inf)
+    # 2. 掩码处理：不合法位置设为 -1e9
     if mask is not None:
         scores = scores.masked_fill(mask == 0, -1e9)
 
-    # 3. softmax
+    # 3. Softmax 转换为权重分布
     att = F.softmax(scores, dim=-1)
 
-    # 4. dropout（可选）
+    # 4. Dropout（可选）
     if dropout is not None:
         att = dropout(att)
 
-    # 5. 输出 (加权 V) + 注意力权重
+    # 5. 加权求和并返回
     return torch.matmul(att, value), att
 
-class MultiHeadAttention(nn.Module):
-    #多头注意力机制
-    def __init__(self, h: int, d_model: int , dropout: float=0.1):
-        """
-        初始化多头注意力层
 
-        :param h: 多头个数（heads）
-        :param d_model: 输入的词向量维度（模型维度）
+# -------------------------------
+# 模块3：Multi-Head Attention
+# -------------------------------
+class MultiHeadAttention(nn.Module):
+    def __init__(self, h: int, d_model: int, dropout: float = 0.1):
+        """
+        多头注意力机制
+        :param h: 多头数
+        :param d_model: 输入向量维度
         :param dropout: dropout比例
         """
         super(MultiHeadAttention, self).__init__()
         assert d_model % h == 0, "d_model必须能被h整除"
 
-        # 每个头负责的维度
+        # 每个头的维度
         self.d_k = d_model // h
         self.h = h
 
-        # Q, K, V, 输出层 的线性变换矩阵
-        # 共4个 Linear：前3个分别生成 query/key/value，最后1个用于多头拼接后的线性映射
+        # 4个线性层：Q, K, V, 输出映射
         self.linears = nn.ModuleList(
             [copy.deepcopy(nn.Linear(d_model, d_model)) for _ in range(4)]
         )
 
-        # 保存注意力权重（可选，用于可视化/调试）
-        self.attn = None
-
-        # dropout层，用于防止过拟合
+        self.attn = None  # 保存注意力权重
         self.dropout = nn.Dropout(p=dropout)
 
-    def attention(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        mask: torch.Tensor=None,
-        dropout: torch.nn.Module=None
-    ):
+    def attention(self, query, key, value, mask=None, dropout=None):
         """
-        计算 Scaled Dot-Product Attention
-
-        :param query: 查询向量 [batch_size, h, seq_len, d_k]
-        :param key: 键向量 [batch_size, h, seq_len, d_k]
-        :param value: 值向量 [batch_size, h, seq_len, d_k]
-        :param mask: 掩码 [batch_size, 1, 1, seq_len]，防止某些位置被关注
-        :param dropout: dropout模块
-        :return: (加权后的value, 注意力权重)
+        计算单头的 scaled dot-product attention
         """
-        # 1) 计算注意力得分矩阵: Q * K^T / sqrt(d_k)
         d_k = query.size(-1)
+
+        # 1) 注意力分数
         scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(d_k)
 
-        # 2) 如果有mask，把不合法的位置替换为 -1e9 (softmax后趋近于0)
+        # 2) 掩码处理
         if mask is not None:
             scores = scores.masked_fill(mask == 0, -1e9)
 
-
-        # 3) softmax 得到注意力权重分布
+        # 3) Softmax
         p_attn = F.softmax(scores, dim=-1)
 
-        # 4) dropout
+        # 4) Dropout
         if dropout is not None:
             p_attn = dropout(p_attn)
 
-        # 5) 加权求和
+        # 5) 加权和
         return torch.matmul(p_attn, value), p_attn
 
-    def forward(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        mask: torch.Tensor=None
-    ):
+    def forward(self, query, key, value, mask=None):
         """
-        前向传播
-
-        :param query: 查询query [batch_size, seq_len, d_model]
-        :param key: 键key [batch_size, seq_len, d_model]
-        :param value: 值value [batch_size, seq_len, d_model]
-        :param mask: 掩码 [batch_size, 1, seq_len]
-        :return: 输出张量 [batch_size, seq_len, d_model]
+        多头注意力前向传播
+        输入: [batch, seq_len, d_model]
+        输出: [batch, seq_len, d_model]
         """
-
-        # 1) 扩展mask以匹配多头
         if mask is not None:
-            mask = mask.unsqueeze(1)  # -> [batch_size, 1, 1, seq_len]
+            mask = mask.unsqueeze(1)  # 扩展到多头维度
 
         nbatches = query.size(0)
 
-
-        # 2) 通过线性层映射并拆分多头
-        # 例如 d_model=512, h=8 -> 每头 d_k=64
-        # 映射后再 reshape: [batch, seq_len, d_model] -> [batch, h, seq_len, d_k]
+        # 1) 映射并拆分多头
         query, key, value = [
             l(x).view(nbatches, -1, self.h, self.d_k).transpose(1, 2)
             for l, x in zip(self.linears, (query, key, value))
         ]
 
-        # 3) 计算多头注意力
+        # 2) 计算注意力
         x, self.attn = self.attention(query, key, value, mask=mask, dropout=self.dropout)
 
-        # 4) 拼接多头
-        # [batch, h, seq_len, d_k] -> [batch, seq_len, h * d_k = d_model]
+        # 3) 拼接多头 [batch, h, seq_len, d_k] -> [batch, seq_len, d_model]
         x = x.transpose(1, 2).contiguous().view(nbatches, -1, self.h * self.d_k)
 
-        # 5) 最终线性映射，保持输出维度仍为 d_model
+        # 4) 输出映射
         return self.linears[-1](x)
 
+
+# -------------------------------
+# 模块4：Layer Normalization
+# -------------------------------
 class LayerNormalization(nn.Module):
     """
-    module 4：基于层的标准化
+    层标准化 LayerNorm
     """
     def __init__(self, features, eps=1e-6):
         super(LayerNormalization, self).__init__()
-        self.gamma = nn.Parameter(torch.ones(features))
-        self.beta = nn.Parameter(torch.zeros(features))
+        self.gamma = nn.Parameter(torch.ones(features))  # 可学习缩放系数
+        self.beta = nn.Parameter(torch.zeros(features))  # 可学习平移系数
         self.eps = eps
-        self.features = features
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # [batch, seq_len, d_model]
-        mean = x.mean(dim=-1, keepdim=True)
-        var = x.var(dim=-1, keepdim=True, unbiased=False)
 
-        return self.gamma * (x - mean)/torch.sqrt(var + self.eps) + self.beta
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [batch, seq_len, d_model]
+        mean = x.mean(dim=-1, keepdim=True)  # 均值
+        var = x.var(dim=-1, keepdim=True, unbiased=False)  # 方差
+
+        # 归一化 + 仿射变换
+        return self.gamma * (x - mean) / torch.sqrt(var + self.eps) + self.beta
+
+
+# -------------------------------
+# 模块5：Feed Forward Network (FFN)
+# -------------------------------
+class FFN(nn.Module):
+    """
+    前馈神经网络（位置独立）
+    """
+    def __init__(self, d_model, d_ff, dropout=0.1):
+        super(FFN, self).__init__()
+        self.l1 = nn.Linear(d_model, d_ff)   # 升维
+        self.l2 = nn.Linear(d_ff, d_model)   # 降维
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        # ReLU 激活 + Dropout
+        return self.l2(self.dropout(F.relu(self.l1(x))))
+
+
+# -------------------------------
+# 模块6：Encoder Block One (MHA + Add&Norm)
+# -------------------------------
+class BlockOne(nn.Module):
+    def __init__(self, head_num, d_model, dropout):
+        super(BlockOne, self).__init__()
+        self.mha = MultiHeadAttention(head_num, d_model, dropout)
+        self.ln = LayerNormalization(d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, query, key, value, mask=None):
+        # 1) Multi-head attention
+        x_mha = self.mha(query, key, value, mask)
+
+        # 2) 残差连接 + Dropout
+        query = query + self.dropout(x_mha)
+
+        # 3) LayerNorm
+        query = self.ln(query)
+
+        return query
+
+
+# -------------------------------
+# 模块7：Encoder Block Two (FFN + Add&Norm)
+# -------------------------------
+class BlockTwo(nn.Module):
+    def __init__(self, d_model, d_ff, dropout):
+        super(BlockTwo, self).__init__()
+        self.ffn = FFN(d_model=d_model, d_ff=d_ff, dropout=dropout)
+        self.ln = LayerNormalization(features=d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        # 1) FFN
+        ffn_x = self.ffn(x)
+
+        # 2) 残差连接 + Dropout
+        x = x + self.dropout(ffn_x)
+
+        # 3) LayerNorm
+        x = self.ln(x)
+        return x
+
+
+# -------------------------------
+# 模块8：完整 Encoder Layer
+# -------------------------------
+class EncoderLayer(nn.Module):
+    def __init__(self, head_num, d_model, d_ff, dropout):
+        super(EncoderLayer, self).__init__()
+        self.bk1 = BlockOne(head_num=head_num, d_model=d_model, dropout=dropout)
+        self.bk2 = BlockTwo(d_model=d_model, d_ff=d_ff, dropout=dropout)
+
+    def forward(self, x, mask=None):
+        # Self-Attention + FFN
+        x = self.bk1(x, x, x, mask)
+        x = self.bk2(x)
+        return x
+
+
+# -------------------------------
+# 模块9：完整 Decoder Layer
+# -------------------------------
+class DecoderLayer(nn.Module):
+    def __init__(self, head_num, d_model, d_ff, dropout):
+        super(DecoderLayer, self).__init__()
+        # 1) masked multi-head self-attention
+        self.bk1 = BlockOne(head_num=head_num, d_model=d_model, dropout=dropout)
+        # 2) encoder-decoder attention
+        self.bk2 = BlockOne(head_num=head_num, d_model=d_model, dropout=dropout)
+        # 3) FFN
+        self.bk3 = BlockTwo(d_model=d_model, d_ff=d_ff, dropout=dropout)
+
+    def forward(self, query, memory, src_mask=None, tgt_mask=None):
+        # 1) masked self-attention
+        out = self.bk1.forward(query=query, key=query, value=query, mask=tgt_mask)
+        # 2) encoder-decoder attention
+        out = self.bk2.forward(query=out, key=memory, value=memory, mask=src_mask)
+        # 3) FFN
+        out = self.bk3.forward(out)
+        return out
 
