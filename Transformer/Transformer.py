@@ -270,3 +270,127 @@ class DecoderLayer(nn.Module):
         out = self.bk3.forward(out)
         return out
 
+class EncoderStack(nn.Module):
+    """
+    编码器堆栈（由多个 EncoderLayer 顺序堆叠）
+    注意：这里的 residual（残差连接）已经在 EncoderLayer 内部实现，
+         所以栈本身不需要额外处理残差。
+    """
+
+    def __init__(self, layer, layer_num):
+        super(EncoderStack, self).__init__()
+        # 深拷贝多份同样的 encoder 层
+        self.layers = nn.ModuleList([copy.deepcopy(layer) for _ in range(layer_num)])
+        # 末尾加 LayerNorm（原论文在每个子层后 + 残差前有 norm）
+        self.norm = LayerNormalization(layer.d_model)
+
+    def forward(self, x, mask):
+        for layer in self.layers:
+            x = layer(x, mask)
+        return self.norm(x)
+
+class DecoderStack(nn.Module):
+    """
+    解码器堆叠（由多个 DecoderLayer 顺序堆叠）
+    """
+    def __init__(self, layer, layer_num):
+        super(DecoderStack, self).__init__()
+        self.layers = nn.ModuleList([copy.deepcopy(layer) for _ in range(layer_num)])
+        self.norm = LayerNormalization(layer.d_model)
+
+    def forward(self, x, memory, src_mask, tgt_mask):
+        """
+        :param x: 目标序列 embedding
+        :param memory: 来自 encoder 的输出
+        :param src_mask: encoder padding mask
+        :param tgt_mask: decoder 自回归 + padding mask
+        """
+        for layer in self.layers:
+            x = layer(x, memory, src_mask, tgt_mask)
+        return self.norm(x)
+
+class Generator(nn.Module):
+    """
+    解码器输出映射层：Linear + LogSoftmax
+    """
+
+    def __init__(self, d_model:int, vocab:int):
+        super(Generator, self).__init__()
+        self.linear = nn.Linear(d_model, vocab)
+
+    def forward(self, x):
+        # 使用 log_softmax 而不是 softmax：
+        # 1. 数值更稳定（避免极小概率 underflow）
+        # 2. 方便与 NLLLoss 搭配使用
+        return F.log_softmax(self.linear(x), dim=-1)
+
+class Translate(nn.Module):
+    """
+    整体翻译模型：Embedding + PositionalEncoding + EncoderStack + DecoderStack + Generator
+    """
+    def __init__(self, src_vocab_size:int, tgt_vocab_size:int,
+                 head_num:int=8, layer_num:int=6,
+                 d_model:int=512, d_ff:int=2048, dropout:float=0.1):
+        super(Translate, self).__init__()
+
+        # 构建 Encoder / Decoder 层
+        encoder_layer = EncoderLayer(head_num, d_model, d_ff, dropout)
+        decoder_layer = DecoderLayer(head_num, d_model, d_ff, dropout)
+
+        # 堆叠多个 encoder/decoder 层
+        self.encoder_stack = EncoderStack(encoder_layer, layer_num)
+        self.decoder_stack = DecoderStack(decoder_layer, layer_num)
+
+        # 位置编码器
+        self.pe_encode = PositionalEncoding(d_model, dropout)
+        self.pe_decode = PositionalEncoding(d_model, dropout)
+
+        # 词向量
+        self.src_embedd = nn.Embedding(src_vocab_size, d_model)
+        self.tgt_embedd = nn.Embedding(tgt_vocab_size, d_model)
+
+        # 输出层
+        self.generator = Generator(d_model, tgt_vocab_size)
+
+    def forward(self, src, tgt, src_mask, tgt_mask):
+        """
+        :param src: 源序列 [batch_size, src_len]
+        :param tgt: 目标序列 [batch_size, tgt_len]
+        :param src_mask: 源 mask [batch_size, 1, 1, src_len]
+        :param tgt_mask: 目标 mask [batch_size, 1, tgt_len, tgt_len]
+        """
+        src_embedding = self.pe_encode(self.src_embedd(src))
+        tgt_embedding = self.pe_decode(self.tgt_embedd(tgt))  # ⚠️ 原来用 pe_encode，这里改为 pe_decode
+
+        encoder_output = self.encoder_stack(src_embedding, src_mask)
+        decoder_output = self.decoder_stack(tgt_embedding, encoder_output, src_mask, tgt_mask)
+
+        softmax_out = self.generator(decoder_output)
+        return decoder_output, softmax_out
+
+def get_decoder_mask(data, pad=0):
+    """
+    Decoder mask：结合 padding mask 和 subsequent mask
+    """
+    # padding 部分
+    tgt_mask = (data != pad).unsqueeze(-2)  # [batch, 1, tgt_len]
+    # 自回归屏蔽
+    tgt_mask = tgt_mask & subsequent_mask(data.size(-1)).to(data.device)
+    return tgt_mask
+
+
+def subsequent_mask(size):
+    """
+    生成自回归 mask（上三角为 False，下三角为 True）
+    shape: [1, size, size]
+    """
+    attn_shape = (1, size, size)
+    mask = np.triu(np.ones(attn_shape), k=1).astype('bool')
+    return torch.from_numpy(~mask)   # True=可见, False=不可见
+
+
+def get_encoder_mask(data, pad=0):
+    """
+    Encoder mask：只处理 padding
+    """
+    return (data != pad).unsqueeze(-2)  # [batch, 1, src_len]

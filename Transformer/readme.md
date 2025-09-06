@@ -369,4 +369,93 @@ class LayerNormalization(nn.Module):
 
 ---
 
+### EncoderStack（编码器栈）
+
+* **结构**：由多个 `EncoderLayer` 组成的堆叠，每层输入输出维度一致。最后附带一层 LayerNorm。
+* **作用**：
+
+  * **逐层提取特征**：多层堆叠的自注意力和 FFN 结构，使得模型能捕获更深层次的序列依赖关系。
+  * **LayerNorm 稳定训练**：虽然论文图示中未画出最终 Norm，但实践中常加入，以避免训练发散。
+
+---
+
+### DecoderStack（解码器栈）
+
+* **结构**：多个 `DecoderLayer` 堆叠，每层包含 Masked Self-Attention、Encoder-Decoder Attention 与 FFN。最后加 LayerNorm。
+* **作用**：
+
+  * **Masked Self-Attention**：确保解码过程中，位置 $t$ 只能访问 $[0, t]$ 的信息，避免“偷看未来”。
+  * **跨注意力**：结合 Encoder 的输出 memory，使解码器在生成目标语言时能参照源语言上下文。
+  * **层归一化**：防止梯度消失/爆炸，提升稳定性。
+
+---
+
+### Generator（输出层）
+
+* **结构**：`Linear → log_softmax`
+* **作用**：将解码器输出维度 $d_{model}$ 映射到目标词表大小。
+* **关于 log\_softmax**：
+
+  * 使用 `log_softmax` 而不是 `softmax`：
+
+    1. **数值更稳定**（避免指数溢出/下溢）。
+    2. **训练更方便**，可以与 `NLLLoss` 直接搭配，或者直接使用 `CrossEntropyLoss`（内部等价于 `log_softmax + NLLLoss`）。
+  * **logits 的含义**：指模型输出的**原始分数**（未归一化）。在训练时直接传给 `CrossEntropyLoss` 即可；在推理时可转为 `softmax` 概率分布，或保留 logits 进行采样/beam search。
+
+---
+
+### Translate（整体翻译器）
+
+* **结构**：
+
+  * Embedding（源/目标词表 → 向量表示）
+  * Positional Encoding（加入位置信息）
+  * EncoderStack（多层编码器）
+  * DecoderStack（多层解码器）
+  * Generator（输出层，映射至词表概率分布）
+
+* **数据流动**：
+
+  1. 源序列 → embedding + 位置编码 → 编码器 → `memory`
+  2. 目标序列（teacher forcing） → embedding + 位置编码 → 解码器（与 memory 融合）
+  3. 解码器输出 → Generator → logits / log\_probs
+
+* **意义**：模块化封装后，可以自由扩展，如调整 `layer_num`，替换注意力机制，或改进 FFN 结构。
+
+---
+
+### Mask（掩码机制）
+
+* **Encoder mask（padding mask）**：
+
+  * **用途**：屏蔽输入中的 `<pad>` 位置，避免模型在注意力中关注到无效 token。
+  * **形状**：`[batch_size, 1, src_len]`
+  * **构造方法**：输入中非 `<pad>` 的位置置 1，否则置 0。
+
+* **Decoder mask（look-ahead mask + padding mask）**：
+
+  * **用途**：保证训练时目标序列预测某一位置时，只能看到当前位置及之前的 token；同时屏蔽 `<pad>`。
+  * **形状**：`[batch_size, tgt_len, tgt_len]`
+  * **构造方法**：
+
+    * look-ahead mask：上三角矩阵，保证未来位置不可见。
+    * padding mask：与 encoder mask 类似。
+    * 最终 mask：二者取逻辑与。
+
+---
+
+📌 **总结**：
+
+* **EncoderStack / DecoderStack** → 通过多层堆叠增强特征抽取能力。
+* **Generator** → logits → log\_softmax → loss/预测。
+* **Translate** → 将所有模块组合成一个完整的翻译模型。
+* **Mask** → 核心机制，保证 padding 不被关注，解码器不能“偷看未来”。
+* **优化建议**：
+
+  * 训练时推荐直接用 `nn.CrossEntropyLoss` 输入 logits。
+  * 推理时可使用 logits + beam search / top-k / temperature。
+  * Mask 构造时可充分利用 PyTorch 内置函数（如 `torch.triu`、`F.pad`），避免 numpy 来回转换。
+
+---
+ 
 
