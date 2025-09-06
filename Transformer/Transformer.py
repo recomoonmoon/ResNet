@@ -112,10 +112,8 @@ class MultiHeadAttention(nn.Module):
 
         # 2) 如果有mask，把不合法的位置替换为 -1e9 (softmax后趋近于0)
         if mask is not None:
-            try:
-                scores = scores.masked_fill(mask == 0, -1e9)
-            except Exception as e:
-                logger.error(e.__str__())
+            scores = scores.masked_fill(mask == 0, -1e9)
+
 
         # 3) softmax 得到注意力权重分布
         p_attn = F.softmax(scores, dim=-1)
@@ -150,8 +148,6 @@ class MultiHeadAttention(nn.Module):
 
         nbatches = query.size(0)
 
-        if mask is not None:
-            logger.debug('mask shape:%s' % str(mask.shape))
 
         # 2) 通过线性层映射并拆分多头
         # 例如 d_model=512, h=8 -> 每头 d_k=64
@@ -170,3 +166,21 @@ class MultiHeadAttention(nn.Module):
 
         # 5) 最终线性映射，保持输出维度仍为 d_model
         return self.linears[-1](x)
+
+class LayerNormalization(nn.Module):
+    """
+    module 4：基于层的标准化
+    """
+    def __init__(self, features, eps=1e-6):
+        super(LayerNormalization, self).__init__()
+        self.gamma = nn.Parameter(torch.ones(features))
+        self.beta = nn.Parameter(torch.zeros(features))
+        self.eps = eps
+        self.features = features
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # [batch, seq_len, d_model]
+        mean = x.mean(dim=-1, keepdim=True)
+        var = x.var(dim=-1, keepdim=True, unbiased=False)
+
+        return self.gamma * (x - mean)/torch.sqrt(var + self.eps) + self.beta
+

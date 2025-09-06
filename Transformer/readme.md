@@ -170,4 +170,82 @@ Q × Kᵀ → 缩放 (scale) → 掩码 (mask) → Softmax → 与 V 相乘
 * 保证每个步骤维度正确，才能实现稳定的 Transformer 复现。
 
 ---
- 
+
+## 🔹 Layer Normalization (LN)
+
+**Layer Normalization** 与 **Batch Normalization** 类似，都是对输入进行归一化，使模型训练更稳定。不同点在于：
+
+* **BatchNorm**：对 batch 维度统计均值和方差，依赖于 batch size。
+* **LayerNorm**：对每个样本的 **特征维度**（如 `d_model`）统计均值和方差，不依赖 batch size。
+
+因此，Transformer 中更适合使用 **LayerNorm**，因为 NLP 任务常常 batch size 较小，而 LN 与 batch size 无关。
+
+---
+
+### 📌 公式
+
+对输入张量 `x ∈ R^(batch, seq_len, d_model)`，在最后一维 `d_model` 上做归一化：
+
+![img_2.png](img_2.png)
+---
+
+### 📌 代码实现注意点
+
+1. **均值和方差计算**
+
+   ```python
+   mean = x.mean(dim=-1, keepdim=True)
+   var = x.var(dim=-1, keepdim=True, unbiased=False)
+   std = torch.sqrt(var + self.eps)
+   ```
+
+   * 必须 `keepdim=True`，保证形状可广播。
+   * `unbiased=False`，除以 `N`，避免小 batch 时数值不稳定。
+
+2. **gamma 和 beta 的形状**
+
+   ```python
+   self.gamma = nn.Parameter(torch.ones(features))
+   self.beta = nn.Parameter(torch.zeros(features))
+   ```
+
+   * 只需一维 `[features]`，PyTorch 广播机制会自动扩展到 `[batch, seq_len, d_model]`。
+
+3. **forward 逻辑**
+
+   ```python
+   return self.gamma * (x - mean) / std + self.beta
+   ```
+
+---
+
+### ✅ 代码示例
+
+```python
+class LayerNormalization(nn.Module):
+    def __init__(self, features, eps=1e-6):
+        super(LayerNormalization, self).__init__()
+        self.gamma = nn.Parameter(torch.ones(features))
+        self.beta = nn.Parameter(torch.zeros(features))
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        mean = x.mean(dim=-1, keepdim=True)
+        var = x.var(dim=-1, keepdim=True, unbiased=False)
+        std = torch.sqrt(var + self.eps)
+        return self.gamma * (x - mean) / std + self.beta
+```
+
+---
+
+### ✨ 总结
+
+* **LN 与 BN 的区别**：LN 不依赖 batch size，更适合 Transformer。
+* **实现要点**：
+
+  * 在最后一维上求均值和方差。
+  * 使用 `unbiased=False` 避免小样本不稳定。
+  * 参数 `gamma`、`beta` 通过广播自动扩展。
+* LN 的核心思想就是 **对每个样本的 embedding 向量做归一化，再通过可学习参数调整分布**。
+
+---
