@@ -4,4 +4,8 @@
 
 * 环境依赖
   * openai 调用API
-
+  * dotenv 存储
+  
+* 主要内容
+  * [Prompt Engineer](./1_prompt.md)
+  * [LangChain](./2_lanchain.md)
