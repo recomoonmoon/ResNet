@@ -51,7 +51,9 @@
   * 模型规模与算力需求
   * 训练数据的构建
 
-* [代码与文档](https://github.com/recomoonmoon/LLM_learning_book/blob/master/LLM_base/)
+
+* **成果：**
+  * [代码与文档](https://github.com/recomoonmoon/LLM_learning_book/blob/master/LLM_base/)
 
 ---
 
